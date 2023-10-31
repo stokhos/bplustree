@@ -24,11 +24,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 // use parking_lot_core::SpinWait;
 
-#[cfg(test)]
-// pub mod bench;
 pub mod error;
 pub mod iter;
 pub mod latch;
+
 #[cfg(test)]
 pub mod util;
 
