@@ -1,16 +1,20 @@
 use crossbeam_queue::ArrayQueue;
 use io_uring::IoUring;
-use std::{os::unix::io::{AsRawFd, RawFd}, convert::TryInto};
+use std::num::NonZeroUsize;
+use std::{
+    convert::TryInto,
+    os::unix::io::{AsRawFd, RawFd},
+};
 
-use crate::latch::{SharedGuard, HybridLatch};
-use super::{BufferFrame, swip::Pid};
+use super::{swip::Pid, BufferFrame};
+use crate::latch::{HybridLatch, SharedGuard};
 
 #[derive(PartialEq, Eq, Debug)]
 enum State {
     Free,
     Ready,
     Pending,
-    Done
+    Done,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -55,20 +59,14 @@ impl Slot {
                 let storage = stg.storage.as_ref();
                 &storage[stg.alignment_offset..(stg.alignment_offset + stg.size)]
             }
-            Storage::Guard(ref stg) => {
-                stg.guard.as_ref().expect("exists").page_bytes()
-            }
+            Storage::Guard(ref stg) => stg.guard.as_ref().expect("exists").page_bytes(),
         }
     }
 
     fn slot_iovec(&self) -> &libc::iovec {
         match self.storage {
-            Storage::Buffer(ref stg) => {
-                &stg.iovec
-            }
-            Storage::Guard(ref stg) => {
-                stg.iovec.as_ref().expect("exists")
-            }
+            Storage::Buffer(ref stg) => &stg.iovec,
+            Storage::Guard(ref stg) => stg.iovec.as_ref().expect("exists"),
         }
     }
 
@@ -87,7 +85,8 @@ impl Slot {
                     Storage::Buffer(ref mut stg) => {
                         assert_eq!(stg.size, guard.page_bytes().len());
                         let storage = stg.storage.as_mut();
-                        storage[stg.alignment_offset..(stg.alignment_offset + stg.size)].copy_from_slice(guard.page_bytes());
+                        storage[stg.alignment_offset..(stg.alignment_offset + stg.size)]
+                            .copy_from_slice(guard.page_bytes());
                     }
                     Storage::Guard(ref mut stg) => {
                         let iovec = libc::iovec {
@@ -101,7 +100,7 @@ impl Slot {
 
                 self.state = State::Ready;
             }
-            _ => panic!("only free slots can become ready")
+            _ => panic!("only free slots can become ready"),
         }
     }
 
@@ -111,7 +110,7 @@ impl Slot {
                 // TODO return buffer for submission
                 self.state = State::Pending;
             }
-            _ => panic!("only ready slots can become pending")
+            _ => panic!("only ready slots can become pending"),
         }
     }
 
@@ -121,7 +120,7 @@ impl Slot {
                 // TODO grab buffer back for reuse
                 self.state = State::Done;
             }
-            _ => panic!("only pending slots can become done")
+            _ => panic!("only pending slots can become done"),
         }
     }
 
@@ -138,7 +137,7 @@ impl Slot {
                 }
                 self.state = State::Free;
             }
-            _ => panic!("only done slots can become free") // FIXME ?
+            _ => panic!("only done slots can become free"), // FIXME ?
         }
     }
 }
@@ -154,7 +153,7 @@ pub(crate) struct WriteBuffer {
     n_slots: usize,
     slot_size: usize,
     free_slots: ArrayQueue<usize>, // TODO change this to some simple queue, this does not need to
-                                   // be thread-safe
+    // be thread-safe
     slots: Vec<Slot>,
     ring: io_uring::IoUring,
     fd: RawFd,
@@ -171,20 +170,29 @@ impl WriteBuffer {
             free_slots.push(i).unwrap();
 
             let storage = if use_guard {
-                Storage::Guard(GuardStorage { guard: None, iovec: None })
+                Storage::Guard(GuardStorage {
+                    guard: None,
+                    iovec: None,
+                })
             } else {
                 let (alignment_offset, storage) = aligned_boxed_slice(slot_size, 512);
                 let iovec = libc::iovec {
-                    iov_base: storage[alignment_offset..(alignment_offset + slot_size)].as_ptr() as *mut _,
+                    iov_base: storage[alignment_offset..(alignment_offset + slot_size)].as_ptr()
+                        as *mut _,
                     iov_len: slot_size,
                 };
-                Storage::Buffer(BufferStorage { alignment_offset, storage, size: slot_size, iovec })
+                Storage::Buffer(BufferStorage {
+                    alignment_offset,
+                    storage,
+                    size: slot_size,
+                    iovec,
+                })
             };
 
             slots.push(Slot {
                 storage,
                 meta: None,
-                state: State::Free
+                state: State::Free,
             });
         }
         WriteBuffer {
@@ -214,18 +222,34 @@ impl WriteBuffer {
             io_uring::types::Fd(self.fd),
             // slot.slot_bytes().as_ptr(),
             // slot.slot_bytes().len().try_into().expect("too large")
-            slot.slot_iovec() as * const _,
-            1
+            slot.slot_iovec() as *const _,
+            1,
         )
-            .offset(slot.meta.expect("exists").pid.page_id().try_into().expect("too large"))
-            .build()
-            .user_data(slot_idx as u64);
+        .offset(
+            slot.meta
+                .expect("exists")
+                .pid
+                .page_id()
+                .try_into()
+                .expect("too large"),
+        )
+        .build()
+        .user_data(slot_idx as u64);
 
-        unsafe { self.ring.submission().push(&entry).expect("must not be full") };
+        unsafe {
+            self.ring
+                .submission()
+                .push(&entry)
+                .expect("must not be full")
+        };
     }
 
     pub(crate) fn submit(&mut self) -> usize {
-        let ready_slots: Vec<_> = self.slots.iter_mut().filter(|s| s.state == State::Ready).collect();
+        let ready_slots: Vec<_> = self
+            .slots
+            .iter_mut()
+            .filter(|s| s.state == State::Ready)
+            .collect();
         let ready_len = ready_slots.len();
         if ready_len > 0 {
             self.ring.submit().expect("failed to submit");
@@ -257,7 +281,8 @@ impl WriteBuffer {
 
     pub(crate) fn done_items(&mut self) -> Vec<(LatchOrGuard, u64)> {
         let free_slots = &self.free_slots;
-        self.slots.iter_mut()
+        self.slots
+            .iter_mut()
             .enumerate()
             .filter(|(i, s)| s.state == State::Done)
             .map(|(i, s)| {
@@ -267,9 +292,7 @@ impl WriteBuffer {
                     Storage::Guard(ref mut stg) => {
                         LatchOrGuard::Guard(stg.guard.take().expect("must exist"))
                     }
-                    Storage::Buffer(_) => {
-                        LatchOrGuard::Latch(meta.frame)
-                    }
+                    Storage::Buffer(_) => LatchOrGuard::Latch(meta.frame),
                 };
                 s.to_free();
                 free_slots.push(i).unwrap();
@@ -279,15 +302,19 @@ impl WriteBuffer {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, sync::atomic::{AtomicBool, AtomicUsize}};
+    use std::num::NonZeroUsize;
+    use std::os::unix::io::BorrowedFd;
+    use std::{
+        fs::File,
+        sync::atomic::{AtomicBool, AtomicUsize},
+    };
 
     use crate::{latch::HybridLatch, persistent::bufmgr::EMPTY_EPOCH};
-    use nix::sys::mman::{ProtFlags, MapFlags, MmapAdvise};
+    use nix::sys::mman::{MapFlags, MmapAdvise, ProtFlags};
 
-    use crate::persistent::bufmgr::{BufferFrame, Page, BfState, swip::Pid};
+    use crate::persistent::bufmgr::{swip::Pid, BfState, BufferFrame, Page};
 
     use super::WriteBuffer;
 
@@ -298,21 +325,19 @@ mod tests {
         let pool_size = class_size * n_pages;
 
         let addr = unsafe {
-            nix::sys::mman::mmap(
-                std::ptr::null_mut(),
-                pool_size,
+            nix::sys::mman::mmap::<BorrowedFd>(
+                None,
+                NonZeroUsize::new(pool_size).unwrap(),
                 ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                 MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS,
-                -1,
-                0
-                ).expect("failed to init test frames")
+                None,
+                0,
+            )
+            .expect("failed to init test frames")
         };
         unsafe {
-            nix::sys::mman::madvise(
-                addr,
-                pool_size,
-                MmapAdvise::MADV_DONTFORK
-                ).expect("failed to configure pool")
+            nix::sys::mman::madvise(addr, pool_size, MmapAdvise::MADV_DONTFORK)
+                .expect("failed to configure pool")
         };
 
         for frame_idx in 0..n_pages {
@@ -331,7 +356,7 @@ mod tests {
                 writting: false,
                 persisting: AtomicBool::new(false),
                 epoch: AtomicUsize::new(EMPTY_EPOCH),
-                page: page_ref
+                page: page_ref,
             });
 
             frames.push(latched_frame);
