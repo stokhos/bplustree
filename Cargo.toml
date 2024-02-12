@@ -1,13 +1,12 @@
 [package]
-name = "bplustree"
+name = "bptree"
 version = "0.1.0"
 authors = ["André Guedes <andre.guedes@neoway.com.br>"]
-#edition = "2018"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
 description = "Concurrent in-memory B+ Tree featuring optimistic lock coupling"
-repository = "https://github.com/NeowayLabs/bplustree"
+# repository = "https://github.com/NeowayLabs/bplustree"
 
 keywords = ["b-tree", "tree", "concurrent", "map"]
 categories = ["concurrency", "data-structures"]

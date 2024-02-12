@@ -1,3 +1,9 @@
 /target
 Cargo.lock
-/other
+*.out
+quantcup/score
+quantcup/test
+*.gch
+perf.data*
+key*
+.github
